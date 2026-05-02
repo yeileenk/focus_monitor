@@ -1,0 +1,26 @@
+# 가상환경
+venv/
+.venv/
+env/
+
+# 파이썬 캐시
+__pycache__/
+*.py[cod]
+*.pyo
+
+# 세션 로그 & 리포트
+logs/
+
+# MediaPipe 다운로드 모델 캐시
+*.tflite
+
+# macOS
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
+.claude/
+
+# 환경변수
+.env
