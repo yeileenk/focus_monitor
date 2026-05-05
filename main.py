@@ -3,21 +3,15 @@
 # 집중도 모니터링 AI  —  메인 실행 파일
 #
 # 실행 방법:
-#   python main.py
+#   python main.py              # 일반 집중 모니터링 모드
+#   python main.py --exam       # 시험 감시 모드 (엄격한 임계값 + 컨닝 탐지)
 #
 # 종료:
 #   'q' 키 → 세션 리포트 자동 생성 후 종료
-#   's' 키 → 중간에 리포트 미리 보기
-#
-# 파일 구조:
-#   main.py              ← 지금 이 파일
-#   pose_detector.py     ← MediaPipe 랜드마크 추출
-#   ergonomics_rules.py  ← EAR / 머리 자세 / 시선 / 자세 분석
-#   focus_scorer.py      ← 가중 평균 점수 산출 + CSV 로깅
-#   feedback_handler.py  ← 화면 오버레이 + gTTS 음성 알림
-#   report.py            ← 세션 리포트 PNG 생성
+#   's' 키 → 중간 요약 출력
 # ============================================================
 
+import argparse
 import cv2
 import sys
 
@@ -27,16 +21,34 @@ from ergonomics_rules import (
     analyze_head_pose,
     analyze_gaze,
     analyze_posture,
-    EAR_CONSEC_FRAMES,
+    analyze_earphone,
+    get_ear_consec_threshold,
+    EXAM_PITCH_THRESHOLD,
+    PITCH_THRESHOLD,
 )
-from focus_scorer    import FocusScorer
+from focus_scorer     import FocusScorer
 from feedback_handler import FeedbackHandler
 from report           import generate_report
+from device_detector      import DeviceDetector
+from exam_proctor         import ExamProctor
+from accessory_detector   import AccessoryDetector
+from evidence_capture     import EvidenceCapture
+from evidence_viewer      import generate_evidence_report
 
 
 def main():
+    # ── CLI 인자 파싱 ─────────────────────────────────────────
+    parser = argparse.ArgumentParser(description='집중도 모니터링 AI')
+    parser.add_argument('--exam', action='store_true',
+                        help='시험 감시 모드 활성화 (엄격한 임계값 + 컨닝 탐지)')
+    args = parser.parse_args()
+    exam_mode = args.exam
+
+    mode_label = '[시험 감시 모드]' if exam_mode else '[집중도 모니터링 모드]'
+    print(f'[INFO] {mode_label}로 시작합니다.')
+
     # ── 웹캠 초기화 ────────────────────────────────────────────
-    cap = cv2.VideoCapture(0)         # 0 = 기본 웹캠
+    cap = cv2.VideoCapture(0)
     if not cap.isOpened():
         print('[ERROR] 웹캠을 열 수 없습니다. 장치를 확인하세요.')
         sys.exit(1)
@@ -49,15 +61,34 @@ def main():
     print(f'[INFO] 웹캠 해상도: {actual_w} x {actual_h}')
 
     # ── 모듈 초기화 ────────────────────────────────────────────
-    detector = PoseDetector()
-    scorer   = FocusScorer(log_dir='logs')
-    feedback = FeedbackHandler()
+    detector        = PoseDetector()
+    scorer          = FocusScorer(log_dir='logs')
+    feedback        = FeedbackHandler()
+    device_detector    = DeviceDetector()
+    proctor            = ExamProctor()         if exam_mode else None
+    accessory_detector = AccessoryDetector()   if exam_mode else None
 
-    # EAR 연속 프레임 카운터 (졸음 판단용)
-    ear_counter = 0
+    # 세션 ID = CSV 파일명의 타임스탬프 부분
+    session_id = scorer.log_path.stem.replace('session_', '')
+    evidence   = EvidenceCapture(session_id, log_dir='logs') if exam_mode else None
 
-    print('[INFO] 집중도 모니터링을 시작합니다. 종료하려면 q 를 누르세요.')
-    print('[INFO] 세션 리포트 미리보기: s 키')
+    ear_consec_threshold = get_ear_consec_threshold(exam_mode)
+    pitch_thr            = EXAM_PITCH_THRESHOLD if exam_mode else PITCH_THRESHOLD
+    ear_counter          = 0
+
+    win_title  = 'exam_monitor' if exam_mode else 'focus_monitor'
+    quit_flag  = [False]
+    frame_size = [actual_w, actual_h]   # 콜백에서 참조할 프레임 크기
+
+    def on_mouse(event, x, y, flags, param):
+        if event == cv2.EVENT_LBUTTONDOWN:
+            if feedback.is_quit_button_clicked(x, y, frame_size[0], frame_size[1]):
+                quit_flag[0] = True
+
+    cv2.namedWindow(win_title)
+    cv2.setMouseCallback(win_title, on_mouse)
+
+    print(f'[INFO] 종료: q 키 또는 화면 우하단 [종료] 버튼  |  중간 요약: s')
 
     # ── 메인 루프 ──────────────────────────────────────────────
     while cap.isOpened():
@@ -66,46 +97,100 @@ def main():
             print('[WARN] 프레임 읽기 실패 — 종료합니다.')
             break
 
-        # 좌우 반전 (거울 모드)
         frame = cv2.flip(frame, 1)
         h, w  = frame.shape[:2]
+        frame_size[0], frame_size[1] = w, h
 
         # ── 랜드마크 추출 ──────────────────────────────────────
         frame, face_lms, pose_lms = detector.process(frame)
 
         # ── 4개 지표 분석 ──────────────────────────────────────
-        ear_status,  ear_msg,  ear_val              = analyze_ear(face_lms)
-        head_status, head_msg, yaw, pitch           = analyze_head_pose(face_lms, w, h)
-        gaze_status, gaze_msg                       = analyze_gaze(face_lms, w)
-        post_status, post_msg                       = analyze_posture(pose_lms)
+        ear_status,  ear_msg,  ear_val     = analyze_ear(face_lms, exam_mode)
+        head_status, head_msg, yaw, pitch  = analyze_head_pose(face_lms, w, h, exam_mode)
+        gaze_status, gaze_msg              = analyze_gaze(face_lms, w, exam_mode)
+        post_status, post_msg              = analyze_posture(pose_lms)
 
-        # ── EAR 연속 프레임 카운터 ─────────────────────────────
+        # ── 이어폰 감지 (시험 모드에서만) ─────────────────────
+        earphone_detected = False
+        if exam_mode and face_lms is not None:
+            earphone_detected, _ = analyze_earphone(face_lms, frame)
+
+        # ── 착용물 감지 (시험 모드에서만) ─────────────────────
+        accessory_warnings: list = []
+        if exam_mode and accessory_detector is not None:
+            accessory_warnings = accessory_detector.detect(frame, face_lms)
+
+        # ── EAR 연속 카운터 ────────────────────────────────────
         if ear_status == 'EAR_ISSUE':
             ear_counter += 1
         else:
             ear_counter = 0
 
-        # 연속 N 프레임 미만이면 일시적 깜빡임 → GOOD 으로 처리
-        ear_ok  = (ear_counter < EAR_CONSEC_FRAMES)
-        head_ok = (head_status in ('GOOD', 'NO_FACE'))
-        gaze_ok = (gaze_status in ('GOOD', 'NO_FACE'))
+        face_visible = (face_lms is not None)
+        ear_ok  = face_visible and (ear_counter < ear_consec_threshold)
+        head_ok = (head_status == 'GOOD')
+        gaze_ok = (gaze_status == 'GOOD')
         post_ok = (post_status == 'GOOD')
 
+        # ── 전자기기 감지 ──────────────────────────────────────
+        dev_boxes, dev_labels = device_detector.detect(frame)
+
+        # ── 컨닝 패턴 감지 (시험 모드에서만) ──────────────────
+        cheat_events: list[str] = []
+        if exam_mode and proctor is not None:
+            cheat_events = proctor.update(
+                head_status       = head_status,
+                gaze_status       = gaze_status,
+                pitch             = pitch,
+                device_detected   = bool(dev_boxes),
+                earphone_detected = earphone_detected,
+                pitch_threshold   = pitch_thr,
+            )
+
+        # ── 증거 사진 저장 (시험 모드) ────────────────────────
+        if exam_mode and evidence is not None:
+            # 오버레이 전 클린 프레임 기준으로 저장
+            if bool(dev_boxes):
+                clean = feedback.draw_device_boxes(frame.copy(), dev_boxes, dev_labels)
+                evidence.try_save(clean, 'device')
+            for acc_type, _ in accessory_warnings:
+                evidence.try_save(frame, acc_type)
+            if earphone_detected:
+                evidence.try_save(frame, 'earphone')
+
         # ── 점수 산출 ──────────────────────────────────────────
-        score = scorer.update(ear_ok, head_ok, gaze_ok, post_ok)
+        score = scorer.update(ear_ok, head_ok, gaze_ok, post_ok,
+                              device_detected=bool(dev_boxes))
         level, color = scorer.get_level(score)
 
         # ── 화면 오버레이 ──────────────────────────────────────
+        if not face_visible:
+            frame = feedback.put_korean_text(
+                frame, '얼굴을 인식할 수 없습니다',
+                (w // 2 - 140, h // 2 - 20),
+                font_size=26, color=(0, 60, 255), bg_color=(0, 0, 0),
+            )
         frame = feedback.draw_overlay(
             frame, score, level, color,
             ear_msg, head_msg, gaze_msg, post_msg,
             ear_ok, head_ok, gaze_ok, post_ok,
+            exam_mode=exam_mode,
         )
+        frame = feedback.draw_device_boxes(frame, dev_boxes, dev_labels)
+
+        if exam_mode and accessory_warnings:
+            frame = feedback.draw_accessory_warning(frame, accessory_warnings)
+
+        if exam_mode:
+            frame = feedback.draw_exam_status(
+                frame, cheat_events, earphone_detected,
+                proctor.summary()['total_cheat_events'] if proctor else 0,
+            )
 
         # ── 음성 알림 ──────────────────────────────────────────
         feedback.trigger_alerts(score, ear_ok, head_ok, gaze_ok, post_ok)
 
-        # ── 최근 30프레임 평균 표시 ────────────────────────────
+        # ── 최근 30프레임 평균 ─────────────────────────────────
         recent = scorer.recent_avg(30)
         frame  = feedback.put_korean_text(
             frame, f'최근 1초 평균: {recent}점',
@@ -113,28 +198,37 @@ def main():
             font_size=16, color=(200, 200, 200),
         )
 
-        # ── 프레임 출력 ────────────────────────────────────────
-        cv2.imshow('집중도 모니터링 AI', frame)
+        frame = feedback.draw_quit_button(frame)
+        cv2.imshow(win_title, frame)
 
-        # ── 키 입력 처리 ───────────────────────────────────────
         key = cv2.waitKey(1) & 0xFF
-        if key == ord('q'):
+        if key == ord('q') or quit_flag[0]:
             break
         elif key == ord('s'):
-            # 중간 리포트 미리보기
             summ = scorer.summary()
             print('\n[중간 요약]')
             for k, v in summ.items():
-                print(f'  {k}: {v}')
+                if k != 'log_path':
+                    print(f'  {k}: {v}')
+            if exam_mode and proctor:
+                ex = proctor.summary()
+                print(f"  컨닝 이벤트 총계: {ex['total_cheat_events']}건")
 
-    # ── 세션 종료 처리 ─────────────────────────────────────────
+    # ── 세션 종료 ──────────────────────────────────────────────
     print('\n[INFO] 세션을 종료합니다...')
     cap.release()
     cv2.destroyAllWindows()
     detector.release()
+    device_detector.release()
 
-    summary = scorer.summary()
+    dev_summary  = device_detector.summary()
+    exam_summary = proctor.summary() if proctor else {}
+    summary      = scorer.summary()
+
     if summary:
+        summary.update(dev_summary)
+        summary.update(exam_summary)
+
         print('\n===== 세션 최종 요약 =====')
         print(f"  평균 집중도   : {summary['avg_score']}점")
         print(f"  집중 유지율   : {summary['focus_pct']}%")
@@ -142,26 +236,45 @@ def main():
         print(f"  머리 이탈     : {summary['head_out']}회")
         print(f"  시선 이탈     : {summary['gaze_out']}회")
         print(f"  자세 불량     : {summary['posture_bad']}회")
+        print(f"  [기기] 감지   : {summary['device_events']}회 / {summary['device_seconds']}초")
+        if exam_mode:
+            print('  ── 컨닝 패턴 감지 결과 ──')
+            print(f"  AI 탭 전환    : {summary.get('ai_tab_events', 0)}회")
+            print(f"  스마트폰 조회 : {summary.get('phone_look_events', 0)}회")
+            print(f"  시선 이탈     : {summary.get('gaze_cheat_events', 0)}회")
+            print(f"  이어폰 감지   : {summary.get('earphone_events', 0)}회")
+            print(f"  총 의심 이벤트: {summary.get('total_cheat_events', 0)}건")
         print(f"  CSV 저장 경로 : {summary['log_path']}")
         print('==========================')
 
-        # 리포트 PNG 자동 생성
-        report_path = generate_report(scorer.history, summary, output_dir='logs')
-        if report_path:
-            print(f'[INFO] 리포트 이미지: {report_path}')
-
-            # 리포트 이미지 자동으로 열기 (선택사항)
+        report_path = generate_report(
+            scorer.history, summary,
+            output_dir='logs', exam_mode=exam_mode,
+            exam_events=exam_summary.get('event_log', []),
+        )
+        def open_file(path: str):
             try:
                 import subprocess, platform
                 os_name = platform.system()
                 if os_name == 'Windows':
-                    subprocess.Popen(['start', report_path], shell=True)
+                    subprocess.Popen(['start', path], shell=True)
                 elif os_name == 'Darwin':
-                    subprocess.Popen(['open', report_path])
+                    subprocess.Popen(['open', path])
                 else:
-                    subprocess.Popen(['xdg-open', report_path])
+                    subprocess.Popen(['xdg-open', path])
             except Exception:
                 pass
+
+        if report_path:
+            print(f'[INFO] 리포트 이미지: {report_path}')
+            open_file(report_path)
+
+        # ── 증거 사진 리포트 (시험 모드) ──────────────────────
+        if exam_mode and evidence is not None and evidence.count > 0:
+            print(f'[INFO] 증거 사진 {evidence.count}장 저장됨: {evidence.directory}')
+            ev_report = generate_evidence_report(evidence.directory, session_id)
+            if ev_report:
+                open_file(ev_report)
     else:
         print('[INFO] 기록 없음 — 리포트를 생성하지 않습니다.')
 

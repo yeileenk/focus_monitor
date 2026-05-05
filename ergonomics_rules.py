@@ -12,17 +12,24 @@
 import cv2
 import numpy as np
 
-# ── 임계값 설정 ──────────────────────────────────────────────
-EAR_THRESHOLD       = 0.25   # EAR 이 이 값 미만이면 눈 감음으로 판단
-EAR_CONSEC_FRAMES   = 20     # 연속 N 프레임 → 졸음 경보 (≈ 0.67초 @ 30fps)
+# ── 일반 모드 임계값 ─────────────────────────────────────────
+EAR_THRESHOLD       = 0.25
+EAR_CONSEC_FRAMES   = 20     # ≈ 0.67초 @ 30fps
 
-YAW_THRESHOLD       = 30.0   # 좌우 회전각 (도) 임계값
-PITCH_THRESHOLD     = 25.0   # 상하 기울기 (도) 임계값
+YAW_THRESHOLD       = 30.0
+PITCH_THRESHOLD     = 25.0
 
-GAZE_RATIO_MIN      = 0.35   # 홍채 비율 정상 범위 (왼쪽 한계)
-GAZE_RATIO_MAX      = 0.65   # 홍채 비율 정상 범위 (오른쪽 한계)
+GAZE_RATIO_MIN      = 0.35
+GAZE_RATIO_MAX      = 0.65
 
-SHOULDER_TILT_DEG   = 12.0   # 어깨 기울기 (도) 임계값
+SHOULDER_TILT_DEG   = 12.0
+
+# ── 시험 감시 모드 임계값 (더 엄격) ──────────────────────────
+EXAM_EAR_CONSEC_FRAMES  = 10    # ≈ 0.33초 — 짧은 눈 감음도 포착
+EXAM_YAW_THRESHOLD      = 12.0  # 좌우 12도 초과 시 이탈
+EXAM_PITCH_THRESHOLD    = 15.0  # 상하 15도 초과 시 이탈
+EXAM_GAZE_RATIO_MIN     = 0.38
+EXAM_GAZE_RATIO_MAX     = 0.62
 
 
 # ── 1. 눈 개방도 (Eye Aspect Ratio) ─────────────────────────
@@ -71,7 +78,7 @@ def _calculate_ear(landmarks, eye_idx):
 
 # ── 분석 함수 ─────────────────────────────────────────────────
 
-def analyze_ear(face_landmarks) -> tuple[str, str, float]:
+def analyze_ear(face_landmarks, exam_mode: bool = False) -> tuple[str, str, float]:
     """
     눈 개방도(EAR)를 분석하여 졸음 여부를 반환한다.
 
@@ -94,7 +101,11 @@ def analyze_ear(face_landmarks) -> tuple[str, str, float]:
     return 'GOOD', f'EAR: {ear_avg:.2f}', ear_avg
 
 
-def analyze_head_pose(face_landmarks, img_w: int, img_h: int) -> tuple[str, str, float, float]:
+def get_ear_consec_threshold(exam_mode: bool = False) -> int:
+    return EXAM_EAR_CONSEC_FRAMES if exam_mode else EAR_CONSEC_FRAMES
+
+
+def analyze_head_pose(face_landmarks, img_w: int, img_h: int, exam_mode: bool = False) -> tuple[str, str, float, float]:
     """
     solvePnP 를 이용해 머리 자세(Yaw/Pitch)를 추정한다.
 
@@ -134,10 +145,13 @@ def analyze_head_pose(face_landmarks, img_w: int, img_h: int) -> tuple[str, str,
     angles, _, _, _, _, _ = cv2.RQDecomp3x3(rot_mat)
     pitch, yaw, _ = angles
 
+    yaw_thr   = EXAM_YAW_THRESHOLD   if exam_mode else YAW_THRESHOLD
+    pitch_thr = EXAM_PITCH_THRESHOLD if exam_mode else PITCH_THRESHOLD
+
     issues = []
-    if abs(yaw) > YAW_THRESHOLD:
+    if abs(yaw) > yaw_thr:
         issues.append(f'좌우 회전 {yaw:.1f}°')
-    if abs(pitch) > PITCH_THRESHOLD:
+    if abs(pitch) > pitch_thr:
         issues.append(f'상하 기울기 {pitch:.1f}°')
 
     if issues:
@@ -147,7 +161,7 @@ def analyze_head_pose(face_landmarks, img_w: int, img_h: int) -> tuple[str, str,
     return 'GOOD', f'Yaw: {yaw:.1f}°  Pitch: {pitch:.1f}°', yaw, pitch
 
 
-def analyze_gaze(face_landmarks, img_w: int) -> tuple[str, str]:
+def analyze_gaze(face_landmarks, img_w: int, exam_mode: bool = False) -> tuple[str, str]:
     """
     홍채(iris) 랜드마크를 이용해 시선 방향을 분석한다.
     홍채가 눈 영역 내에서 좌/우로 치우쳐 있으면 화면 이탈로 판단.
@@ -176,7 +190,10 @@ def analyze_gaze(face_landmarks, img_w: int) -> tuple[str, str]:
         r_ratio = (r_iris_x - r_left) / max(r_right - r_left, 1)
         avg_ratio = (l_ratio + r_ratio) / 2.0
 
-        if avg_ratio < GAZE_RATIO_MIN or avg_ratio > GAZE_RATIO_MAX:
+        g_min = EXAM_GAZE_RATIO_MIN if exam_mode else GAZE_RATIO_MIN
+        g_max = EXAM_GAZE_RATIO_MAX if exam_mode else GAZE_RATIO_MAX
+
+        if avg_ratio < g_min or avg_ratio > g_max:
             direction = '왼쪽' if avg_ratio < 0.5 else '오른쪽'
             return 'GAZE_ISSUE', f'시선 이탈 ({direction}) ratio={avg_ratio:.2f}'
 
@@ -218,3 +235,51 @@ def analyze_posture(pose_landmarks) -> tuple[str, str]:
 
     except (IndexError, TypeError):
         return 'GOOD', '어깨 감지 불가'
+
+
+# FaceMesh 귀 주변 랜드마크 인덱스
+LEFT_EAR_LM  = 234   # 왼쪽 귀 앞 (tragus 근처)
+RIGHT_EAR_LM = 454   # 오른쪽 귀 앞
+
+def analyze_earphone(face_landmarks, frame: np.ndarray) -> tuple[bool, str]:
+    """
+    귀 랜드마크 주변 영역의 밝기 분포로 이어폰 착용 여부를 추정한다.
+    정확도가 낮아 보조 지표로만 사용한다.
+
+    Returns:
+        detected : 이어폰 의심 여부
+        message  : 화면 표시용 메시지
+    """
+    if face_landmarks is None:
+        return False, ''
+
+    try:
+        h, w = frame.shape[:2]
+        detected_sides = 0
+
+        for lm_idx in (LEFT_EAR_LM, RIGHT_EAR_LM):
+            ex, ey = face_landmarks[lm_idx][0], face_landmarks[lm_idx][1]
+            r = 18   # 탐색 반경 (픽셀)
+            x1 = max(ex - r, 0); x2 = min(ex + r, w)
+            y1 = max(ey - r, 0); y2 = min(ey + r, h)
+
+            roi = frame[y1:y2, x1:x2]
+            if roi.size == 0:
+                continue
+
+            gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+            # 이어폰(흰색/검정 원형 물체)은 주변 피부 대비 분산이 크다
+            std = float(np.std(gray))
+            # 피부 영역 평균 밝기
+            mean_bright = float(np.mean(gray))
+
+            # 고분산(이물질 존재) + 어두운 소재(전형적 이어폰 색상) 판단
+            if std > 38 and mean_bright < 160:
+                detected_sides += 1
+
+        if detected_sides >= 1:
+            return True, '이어폰 착용 의심'
+        return False, ''
+
+    except Exception:
+        return False, ''

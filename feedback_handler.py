@@ -112,6 +112,38 @@ class FeedbackHandler:
         draw.text((x, y), text, font=font, fill=(color[0], color[1], color[2]))
         return cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
 
+    # ── 종료 버튼 ────────────────────────────────────────────
+    QUIT_BTN_W = 90
+    QUIT_BTN_H = 34
+    QUIT_BTN_MARGIN = 12
+
+    def draw_quit_button(self, frame: np.ndarray) -> np.ndarray:
+        """우하단에 종료 버튼을 그린다."""
+        h, w = frame.shape[:2]
+        m = self.QUIT_BTN_MARGIN
+        x1 = w - self.QUIT_BTN_W - m
+        y1 = h - self.QUIT_BTN_H - m
+        x2 = w - m
+        y2 = h - m
+
+        cv2.rectangle(frame, (x1, y1), (x2, y2), (50, 50, 50), -1)
+        cv2.rectangle(frame, (x1, y1), (x2, y2), (120, 120, 120), 1)
+        frame = self.put_korean_text(
+            frame, '종료',
+            (x1 + 22, y1 + 6),
+            font_size=16, color=(220, 220, 220),
+        )
+        return frame
+
+    def is_quit_button_clicked(self, x: int, y: int, frame_w: int, frame_h: int) -> bool:
+        """클릭 좌표가 종료 버튼 영역 안에 있는지 확인한다."""
+        m = self.QUIT_BTN_MARGIN
+        x1 = frame_w - self.QUIT_BTN_W - m
+        y1 = frame_h - self.QUIT_BTN_H - m
+        x2 = frame_w - m
+        y2 = frame_h - m
+        return x1 <= x <= x2 and y1 <= y <= y2
+
     # ── 화면 오버레이 ─────────────────────────────────────────
     def draw_overlay(
         self,
@@ -127,11 +159,20 @@ class FeedbackHandler:
         head_ok:  bool,
         gaze_ok:  bool,
         post_ok:  bool,
+        exam_mode: bool = False,
     ) -> np.ndarray:
         """
         프레임에 집중도 정보를 그린다.
         """
         h, w = frame.shape[:2]
+
+        # ── 시험 모드 상단 라벨 ───────────────────────────────
+        if exam_mode:
+            cv2.rectangle(frame, (0, 0), (w, 28), (0, 0, 160), -1)
+            frame = self.put_korean_text(
+                frame, '[시험 감시 모드 활성]', (w // 2 - 110, 4),
+                font_size=15, color=(255, 255, 255),
+            )
 
         # ── 경보 테두리 ───────────────────────────────────────
         if score < self.ALERT_SCORE:
@@ -188,6 +229,97 @@ class FeedbackHandler:
                 bg_color=(0, 0, 0),
             )
 
+        return frame
+
+    # ── 전자기기 바운딩 박스 ──────────────────────────────────
+    def draw_device_boxes(
+        self,
+        frame: np.ndarray,
+        boxes: list,
+        labels: list,
+    ) -> np.ndarray:
+        """감지된 전자기기에 빨간 박스와 라벨을 그린다."""
+        for (x1, y1, x2, y2), label in zip(boxes, labels):
+            cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 0, 220), 2)
+            frame = self.put_korean_text(
+                frame, f'[기기] {label}',
+                (x1, max(y1 - 24, 0)),
+                font_size=15, color=(20, 20, 255), bg_color=(0, 0, 0),
+            )
+        return frame
+
+    # ── 착용물 경고 (모자·마스크·선글라스) ───────────────────
+    def draw_accessory_warning(
+        self,
+        frame: np.ndarray,
+        warnings: list,
+    ) -> np.ndarray:
+        """감지된 착용물 경고를 화면 중앙에 빨간 박스로 표시한다."""
+        if not warnings:
+            return frame
+
+        h, w = frame.shape[:2]
+
+        # 반투명 빨간 오버레이
+        overlay = frame.copy()
+        box_h = 60 + len(warnings) * 46
+        y1 = h // 2 - box_h // 2
+        y2 = y1 + box_h
+        x1, x2 = w // 2 - 260, w // 2 + 260
+        cv2.rectangle(overlay, (x1, y1), (x2, y2), (0, 0, 180), -1)
+        cv2.addWeighted(overlay, 0.82, frame, 0.18, 0, frame)
+        cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 0, 255), 3)
+
+        # 제목
+        frame = self.put_korean_text(
+            frame, '[ 착용물 감지됨 ]',
+            (x1 + 55, y1 + 10),
+            font_size=22, color=(255, 255, 255),
+        )
+        # 항목별 경고 메시지
+        for i, (_, msg) in enumerate(warnings):
+            frame = self.put_korean_text(
+                frame, f'  >> {msg}',
+                (x1 + 30, y1 + 48 + i * 46),
+                font_size=20, color=(255, 220, 80),
+            )
+        return frame
+
+    # ── 시험 모드 컨닝 경보 표시 ─────────────────────────────
+    def draw_exam_status(
+        self,
+        frame: np.ndarray,
+        cheat_events: list,
+        earphone_detected: bool,
+        total_events: int,
+    ) -> np.ndarray:
+        """새로 발생한 컨닝 이벤트를 화면 우하단에 표시한다."""
+        h, w = frame.shape[:2]
+
+        # 총 의심 이벤트 카운터 (우상단)
+        frame = self.put_korean_text(
+            frame, f'의심 이벤트: {total_events}건',
+            (w - 220, 32),
+            font_size=15, color=(80, 80, 255), bg_color=(0, 0, 0),
+        )
+
+        # 이어폰 감지 아이콘
+        if earphone_detected:
+            frame = self.put_korean_text(
+                frame, '🎧 이어폰 의심',
+                (w - 170, 54),
+                font_size=14, color=(0, 180, 255), bg_color=(0, 0, 0),
+            )
+
+        # 이번 프레임에서 새로 감지된 이벤트 경보
+        from exam_proctor import CHEAT_LABELS
+        for i, ev_type in enumerate(cheat_events[:2]):
+            label = CHEAT_LABELS.get(ev_type, ev_type)
+            frame = self.put_korean_text(
+                frame, f'⚠ {label}',
+                (10, h - 140 + i * 36),
+                font_size=18, color=(0, 0, 255), bg_color=(0, 0, 0),
+            )
         return frame
 
     # ── 음성 알림 ─────────────────────────────────────────────

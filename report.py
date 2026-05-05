@@ -16,7 +16,8 @@ rcParams['font.family'] = ['Malgun Gothic', 'AppleGothic', 'NanumGothic', 'DejaV
 rcParams['axes.unicode_minus'] = False
 
 
-def generate_report(history: list[dict], summary: dict, output_dir: str = 'logs'):
+def generate_report(history: list[dict], summary: dict, output_dir: str = 'logs',
+                    exam_mode: bool = False, exam_events: list = None):
     """
     세션 기록(history) 과 요약(summary) 을 받아 시각화 PNG 를 생성한다.
 
@@ -38,11 +39,17 @@ def generate_report(history: list[dict], summary: dict, output_dir: str = 'logs'
     # 시간축: 프레임 인덱스 → 초 (30fps 가정)
     times = [i / 30 for i in range(len(scores))]
 
-    fig = plt.figure(figsize=(14, 10), facecolor='#0F1B35')
-    fig.suptitle('집중도 모니터링 — 세션 리포트', fontsize=18,
+    if exam_events is None:
+        exam_events = []
+
+    fig_h    = 14 if not exam_mode else 16
+    title    = '시험 감시 — 세션 리포트' if exam_mode else '집중도 모니터링 — 세션 리포트'
+    fig = plt.figure(figsize=(14, fig_h), facecolor='#0F1B35')
+    fig.suptitle(title, fontsize=18,
                  color='white', fontweight='bold', y=0.97)
 
-    grid = fig.add_gridspec(3, 3, hspace=0.45, wspace=0.35)
+    rows = 4 if exam_mode else 3
+    grid = fig.add_gridspec(rows, 3, hspace=0.45, wspace=0.35)
 
     # ── 1. 시간대별 집중도 점수 (상단 전체) ──────────────────
     ax1 = fig.add_subplot(grid[0, :])
@@ -128,9 +135,18 @@ def generate_report(history: list[dict], summary: dict, output_dir: str = 'logs'
         ('머리 이탈',   f"{summary.get('head_out', '-')}회"),
         ('시선 이탈',   f"{summary.get('gaze_out', '-')}회"),
         ('자세 불량',   f"{summary.get('posture_bad', '-')}회"),
+        ('기기 감지',   f"{summary.get('device_events', 0)}회 / {summary.get('device_seconds', 0.0)}초"),
     ]
+    if exam_mode:
+        stat_lines += [
+            ('AI탭전환 의심',   f"{summary.get('ai_tab_events', 0)}회"),
+            ('스마트폰 조회',   f"{summary.get('phone_look_events', 0)}회"),
+            ('이어폰 감지',     f"{summary.get('earphone_events', 0)}회"),
+            ('총 의심 이벤트',  f"{summary.get('total_cheat_events', 0)}건"),
+        ]
+    step = 0.85 / max(len(stat_lines), 1)
     for i, (label, val) in enumerate(stat_lines):
-        y = 0.88 - i * 0.15
+        y = 0.93 - i * step
         ax4.text(0.05, y, label, transform=ax4.transAxes,
                  color='#94A3B8', fontsize=11)
         ax4.text(0.98, y, val, transform=ax4.transAxes,
@@ -164,6 +180,44 @@ def generate_report(history: list[dict], summary: dict, output_dir: str = 'logs'
     ax5.legend(loc='lower right', fontsize=9,
                facecolor='#0F1B35', edgecolor='#334155', labelcolor='white',
                ncol=4)
+
+    # ── 6. 시험 모드 — 컨닝 이벤트 타임라인 ─────────────────
+    if exam_mode and exam_events:
+        ax6 = fig.add_subplot(grid[3, :])
+        ax6.set_facecolor('#1A2D50')
+
+        type_colors = {
+            'ai_tab'    : '#EF4444',
+            'phone_look': '#F97316',
+            'gaze_cheat': '#8B5CF6',
+            'device'    : '#FBBF24',
+            'earphone'  : '#06B6D4',
+        }
+        type_y = {t: i for i, t in enumerate(type_colors)}
+
+        if times:
+            session_start = history[0]['time']
+            for ev in exam_events:
+                ev_t  = ev['time'] - session_start
+                etype = ev['type']
+                ypos  = type_y.get(etype, 0)
+                c     = type_colors.get(etype, '#FFFFFF')
+                ax6.scatter(ev_t, ypos, color=c, s=80, zorder=3)
+
+        ax6.set_yticks(list(type_y.values()))
+        ax6.set_yticklabels(
+            ['AI탭전환', '스마트폰조회', '시선이탈', '기기감지', '이어폰'],
+            color='#94A3B8', fontsize=9,
+        )
+        ax6.set_xlabel('시간 (초)', color='#94A3B8', fontsize=10)
+        ax6.set_title('컨닝 의심 이벤트 타임라인', color='white', fontsize=11)
+        ax6.tick_params(colors='#94A3B8')
+        ax6.spines['bottom'].set_color('#334155')
+        ax6.spines['left'].set_color('#334155')
+        ax6.spines['top'].set_visible(False)
+        ax6.spines['right'].set_visible(False)
+        if times:
+            ax6.set_xlim(0, max(times))
 
     # ── 저장 ──────────────────────────────────────────────────
     Path(output_dir).mkdir(exist_ok=True)

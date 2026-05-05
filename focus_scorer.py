@@ -57,10 +57,11 @@ class FocusScorer:
     # ── 점수 계산 ──────────────────────────────────────────────
     def update(
         self,
-        ear_ok:     bool,
-        head_ok:    bool,
-        gaze_ok:    bool,
-        posture_ok: bool,
+        ear_ok:          bool,
+        head_ok:         bool,
+        gaze_ok:         bool,
+        posture_ok:      bool,
+        device_detected: bool = False,
     ) -> int:
         """
         각 지표의 OK/NG 를 입력받아 집중도 점수(0~100)를 반환한다.
@@ -83,6 +84,7 @@ class FocusScorer:
             'head'   : head_ok,
             'gaze'   : gaze_ok,
             'posture': posture_ok,
+            'device' : device_detected,
         }
         self.history.append(row)
         self.frame_cnt += 1
