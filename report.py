@@ -34,7 +34,6 @@ def generate_report(history: list[dict], summary: dict, output_dir: str = 'logs'
     ear_ok   = [r['ear']     for r in history]
     head_ok  = [r['head']    for r in history]
     gaze_ok  = [r['gaze']    for r in history]
-    post_ok  = [r['posture'] for r in history]
 
     # 시간축: 프레임 인덱스 → 초 (30fps 가정)
     times = [i / 30 for i in range(len(scores))]
@@ -112,10 +111,9 @@ def generate_report(history: list[dict], summary: dict, output_dir: str = 'logs'
         sum(ear_ok) / n * 100,
         sum(head_ok) / n * 100,
         sum(gaze_ok) / n * 100,
-        sum(post_ok) / n * 100,
     ]
-    ind_labels  = ['눈(EAR)', '머리', '시선', '자세']
-    ind_colors  = ['#14B8A6', '#F59E0B', '#8B5CF6', '#10B981']
+    ind_labels  = ['눈(EAR)', '머리', '시선']
+    ind_colors  = ['#14B8A6', '#F59E0B', '#8B5CF6']
     ax3.bar(ind_labels, ok_rates, color=ind_colors, width=0.55, edgecolor='none')
     ax3.axhline(70, color='white', linewidth=0.8, linestyle='--', alpha=0.5)
     ax3.set_ylim(0, 100)
@@ -134,7 +132,6 @@ def generate_report(history: list[dict], summary: dict, output_dir: str = 'logs'
         ('졸음 이벤트', f"{summary.get('drowsy_events', '-')}회"),
         ('머리 이탈',   f"{summary.get('head_out', '-')}회"),
         ('시선 이탈',   f"{summary.get('gaze_out', '-')}회"),
-        ('자세 불량',   f"{summary.get('posture_bad', '-')}회"),
         ('기기 감지',   f"{summary.get('device_events', 0)}회 / {summary.get('device_seconds', 0.0)}초"),
     ]
     if exam_mode:
@@ -159,13 +156,16 @@ def generate_report(history: list[dict], summary: dict, output_dir: str = 'logs'
     ax5 = fig.add_subplot(grid[2, :])
     ax5.set_facecolor('#1A2D50')
     def _smooth(arr, w=15):
+        values = np.array([1 if v else 0 for v in arr], dtype=float)
+        if len(values) == 0:
+            return values
+        w = min(w, len(values))
         k = np.ones(w) / w
-        return np.convolve([1 if v else 0 for v in arr], k, mode='same')
+        return np.convolve(values, k, mode='same')
 
     ax5.plot(times, _smooth(ear_ok),  color='#14B8A6', lw=1.3, label='눈(EAR)')
     ax5.plot(times, _smooth(head_ok), color='#F59E0B', lw=1.3, label='머리')
     ax5.plot(times, _smooth(gaze_ok), color='#8B5CF6', lw=1.3, label='시선')
-    ax5.plot(times, _smooth(post_ok), color='#10B981', lw=1.3, label='자세')
 
     ax5.set_xlim(0, max(times) if times else 1)
     ax5.set_ylim(-0.05, 1.15)
@@ -179,7 +179,7 @@ def generate_report(history: list[dict], summary: dict, output_dir: str = 'logs'
     ax5.spines['right'].set_visible(False)
     ax5.legend(loc='lower right', fontsize=9,
                facecolor='#0F1B35', edgecolor='#334155', labelcolor='white',
-               ncol=4)
+               ncol=3)
 
     # ── 6. 시험 모드 — 컨닝 이벤트 타임라인 ─────────────────
     if exam_mode and exam_events:

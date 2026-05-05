@@ -2,11 +2,10 @@
 # ergonomics_rules.py
 # 집중도 판단 규칙 모듈
 #
-# 4가지 항목을 분석한다:
+# 3가지 항목을 분석한다:
 #   1. 눈 개방도 (EAR)   → 졸음 감지
 #   2. 머리 자세          → 고개 돌림·숙임 감지
 #   3. 시선 방향          → 화면 이탈 감지
-#   4. 자세 (어깨)        → 옆으로 기울기 감지
 # ============================================================
 
 import cv2
@@ -21,8 +20,6 @@ PITCH_THRESHOLD     = 25.0
 
 GAZE_RATIO_MIN      = 0.35
 GAZE_RATIO_MAX      = 0.65
-
-SHOULDER_TILT_DEG   = 12.0
 
 # ── 시험 감시 모드 임계값 (더 엄격) ──────────────────────────
 EXAM_EAR_CONSEC_FRAMES  = 10    # ≈ 0.33초 — 짧은 눈 감음도 포착
@@ -203,45 +200,11 @@ def analyze_gaze(face_landmarks, img_w: int, exam_mode: bool = False) -> tuple[s
         return 'GOOD', '시선 분석 불가 (홍채 랜드마크 없음)'
 
 
-def analyze_posture(pose_landmarks) -> tuple[str, str]:
-    """
-    어깨 랜드마크(11, 12번)의 y 좌표 차이로 어깨 기울기를 분석한다.
-
-    Returns:
-        status  : 'GOOD' 또는 'POSTURE_ISSUE'
-        message : 화면 표시용 메시지
-    """
-    if pose_landmarks is None:
-        return 'GOOD', '자세 감지 불가'   # 어깨 안 보여도 다른 항목으로 판단
-
-    LEFT_SHOULDER  = 11
-    RIGHT_SHOULDER = 12
-
-    try:
-        l_y = pose_landmarks[LEFT_SHOULDER][1]
-        r_y = pose_landmarks[RIGHT_SHOULDER][1]
-        l_x = pose_landmarks[LEFT_SHOULDER][0]
-        r_x = pose_landmarks[RIGHT_SHOULDER][0]
-
-        # 수평선 대비 어깨 기울기 (도)
-        dx   = abs(l_x - r_x)
-        dy   = abs(l_y - r_y)
-        tilt = np.degrees(np.arctan2(dy, dx)) if dx > 0 else 0.0
-
-        if tilt > SHOULDER_TILT_DEG:
-            return 'POSTURE_ISSUE', f'어깨 기울어짐: {tilt:.1f}° (기준 {SHOULDER_TILT_DEG}°)'
-
-        return 'GOOD', f'어깨 기울기: {tilt:.1f}°'
-
-    except (IndexError, TypeError):
-        return 'GOOD', '어깨 감지 불가'
-
-
 # FaceMesh 귀 주변 랜드마크 인덱스
 LEFT_EAR_LM  = 234   # 왼쪽 귀 앞 (tragus 근처)
 RIGHT_EAR_LM = 454   # 오른쪽 귀 앞
 
-def analyze_earphone(face_landmarks, frame: np.ndarray) -> tuple[bool, str]:
+def analyze_earphone(face_landmarks, frame: np.ndarray) -> tuple:
     """
     귀 랜드마크 주변 영역의 밝기 분포로 이어폰 착용 여부를 추정한다.
     정확도가 낮아 보조 지표로만 사용한다.
@@ -249,13 +212,15 @@ def analyze_earphone(face_landmarks, frame: np.ndarray) -> tuple[bool, str]:
     Returns:
         detected : 이어폰 의심 여부
         message  : 화면 표시용 메시지
+        boxes    : 감지된 귀 영역 박스 목록 [(x1,y1,x2,y2), ...]
     """
     if face_landmarks is None:
-        return False, ''
+        return False, '', []
 
     try:
         h, w = frame.shape[:2]
         detected_sides = 0
+        boxes = []
 
         for lm_idx in (LEFT_EAR_LM, RIGHT_EAR_LM):
             ex, ey = face_landmarks[lm_idx][0], face_landmarks[lm_idx][1]
@@ -268,18 +233,16 @@ def analyze_earphone(face_landmarks, frame: np.ndarray) -> tuple[bool, str]:
                 continue
 
             gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
-            # 이어폰(흰색/검정 원형 물체)은 주변 피부 대비 분산이 크다
             std = float(np.std(gray))
-            # 피부 영역 평균 밝기
             mean_bright = float(np.mean(gray))
 
-            # 고분산(이물질 존재) + 어두운 소재(전형적 이어폰 색상) 판단
             if std > 38 and mean_bright < 160:
                 detected_sides += 1
+                boxes.append((x1, y1, x2, y2))
 
         if detected_sides >= 1:
-            return True, '이어폰 착용 의심'
-        return False, ''
+            return True, '이어폰 착용 의심', boxes
+        return False, '', []
 
     except Exception:
-        return False, ''
+        return False, '', []

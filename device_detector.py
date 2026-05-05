@@ -53,6 +53,7 @@ class DeviceDetector:
         # 마지막 추론 결과 캐싱 (격 프레임용)
         self._last_boxes   = []
         self._last_labels  = []
+        self._last_confs   = []
 
     # ── 추론 ──────────────────────────────────────────────────
     def detect(self, frame: np.ndarray):
@@ -62,13 +63,14 @@ class DeviceDetector:
         Returns:
             boxes  : [(x1,y1,x2,y2), ...] 픽셀 좌표
             labels : ['cell phone', ...] 클래스 이름
+            confs  : [0.87, ...] 신뢰도 (0~1)
         """
         self._frame_cnt += 1
 
         # run_every 프레임마다만 추론 (나머지는 캐시 반환)
         if self._frame_cnt % self.run_every != 0:
             self._update_stats(bool(self._last_boxes))
-            return self._last_boxes, self._last_labels
+            return self._last_boxes, self._last_labels, self._last_confs
 
         results = self.model(
             frame,
@@ -77,7 +79,7 @@ class DeviceDetector:
             classes=self._device_class_ids(),
         )
 
-        boxes, labels = [], []
+        boxes, labels, confs = [], [], []
         for r in results:
             for box in r.boxes:
                 cls_name = self.model.names[int(box.cls)]
@@ -85,11 +87,13 @@ class DeviceDetector:
                     x1, y1, x2, y2 = map(int, box.xyxy[0].tolist())
                     boxes.append((x1, y1, x2, y2))
                     labels.append(cls_name)
+                    confs.append(float(box.conf))
 
         self._last_boxes  = boxes
         self._last_labels = labels
+        self._last_confs  = confs
         self._update_stats(bool(boxes))
-        return boxes, labels
+        return boxes, labels, confs
 
     # ── 통계 업데이트 ─────────────────────────────────────────
     def _update_stats(self, detected: bool):

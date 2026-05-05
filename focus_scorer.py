@@ -3,10 +3,9 @@
 # 집중도 점수 산출 및 세션 로깅 모듈
 #
 # 가중치:
-#   눈 개방도 (EAR)   35%
-#   머리 자세          30%
-#   시선 방향          25%
-#   자세 (어깨)        10%
+#   눈 개방도 (EAR)   39%
+#   머리 자세          33%
+#   시선 방향          28%
 # ============================================================
 
 import csv
@@ -18,16 +17,15 @@ import numpy as np
 
 class FocusScorer:
     """
-    프레임마다 4개 지표의 OK/NG 여부를 받아
+    프레임마다 3개 지표의 OK/NG 여부를 받아
     가중 평균으로 0~100점의 집중도 점수를 산출한다.
     60프레임(≈2초)마다 CSV 에 기록한다.
     """
 
     WEIGHTS = {
-        'ear'    : 0.35,
-        'head'   : 0.30,
-        'gaze'   : 0.25,
-        'posture': 0.10,
+        'ear' : 0.39,
+        'head': 0.33,
+        'gaze': 0.28,
     }
 
     # 점수 구간 → 상태 라벨
@@ -44,7 +42,7 @@ class FocusScorer:
         Path(log_dir).mkdir(exist_ok=True)
         ts  = datetime.now().strftime('%Y%m%d_%H%M%S')
         self.log_path  = Path(log_dir) / f'session_{ts}.csv'
-        self.history   = []      # {'time', 'score', 'ear', 'head', 'gaze', 'posture'}
+        self.history   = []      # {'time', 'score', 'ear', 'head', 'gaze'}
         self.frame_cnt = 0
         self._init_csv()
 
@@ -52,7 +50,7 @@ class FocusScorer:
     def _init_csv(self):
         with open(self.log_path, 'w', newline='', encoding='utf-8') as f:
             writer = csv.writer(f)
-            writer.writerow(['timestamp', 'score', 'ear_ok', 'head_ok', 'gaze_ok', 'posture_ok'])
+            writer.writerow(['timestamp', 'score', 'ear_ok', 'head_ok', 'gaze_ok'])
 
     # ── 점수 계산 ──────────────────────────────────────────────
     def update(
@@ -60,17 +58,15 @@ class FocusScorer:
         ear_ok:          bool,
         head_ok:         bool,
         gaze_ok:         bool,
-        posture_ok:      bool,
         device_detected: bool = False,
     ) -> int:
         """
         각 지표의 OK/NG 를 입력받아 집중도 점수(0~100)를 반환한다.
         """
         flags = {
-            'ear'    : ear_ok,
-            'head'   : head_ok,
-            'gaze'   : gaze_ok,
-            'posture': posture_ok,
+            'ear' : ear_ok,
+            'head': head_ok,
+            'gaze': gaze_ok,
         }
         score = round(sum(
             self.WEIGHTS[k] * (100 if v else 0)
@@ -80,11 +76,10 @@ class FocusScorer:
         row = {
             'time'   : time.time(),
             'score'  : score,
-            'ear'    : ear_ok,
-            'head'   : head_ok,
-            'gaze'   : gaze_ok,
-            'posture': posture_ok,
-            'device' : device_detected,
+            'ear'   : ear_ok,
+            'head'  : head_ok,
+            'gaze'  : gaze_ok,
+            'device': device_detected,
         }
         self.history.append(row)
         self.frame_cnt += 1
@@ -104,7 +99,6 @@ class FocusScorer:
                 row['ear'],
                 row['head'],
                 row['gaze'],
-                row['posture'],
             ])
 
     # ── 점수 → 상태 ────────────────────────────────────────────
@@ -137,6 +131,5 @@ class FocusScorer:
             'drowsy_events' : sum(1 for r in self.history if not r['ear']),
             'head_out'      : sum(1 for r in self.history if not r['head']),
             'gaze_out'      : sum(1 for r in self.history if not r['gaze']),
-            'posture_bad'   : sum(1 for r in self.history if not r['posture']),
             'log_path'      : str(self.log_path),
         }

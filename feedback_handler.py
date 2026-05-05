@@ -36,7 +36,6 @@ class FeedbackHandler:
         'EAR_ISSUE'     : '눈이 감기고 있습니다. 졸음을 주의하세요.',
         'HEAD_ISSUE'    : '고개가 돌아갔습니다. 화면을 바라봐 주세요.',
         'GAZE_ISSUE'    : '시선이 화면을 벗어났습니다.',
-        'POSTURE_ISSUE' : '어깨가 기울어졌습니다. 자세를 바로잡아 주세요.',
         'LOW_SCORE'     : '집중도가 낮아졌습니다. 잠시 스트레칭해보세요.',
     }
 
@@ -112,6 +111,47 @@ class FeedbackHandler:
         draw.text((x, y), text, font=font, fill=(color[0], color[1], color[2]))
         return cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
 
+    # ── 스터디 타이머 표시 ───────────────────────────────────
+    def draw_study_timer(
+        self,
+        frame: np.ndarray,
+        time_left: float,
+        total: float,
+    ) -> np.ndarray:
+        """우상단에 남은 시간 + 진행 바를 표시한다."""
+        h, w = frame.shape[:2]
+
+        rem   = int(time_left)
+        hh    = rem // 3600
+        mm    = (rem % 3600) // 60
+        ss    = rem % 60
+        ts    = f'{hh:02d}:{mm:02d}:{ss:02d}' if hh > 0 else f'{mm:02d}:{ss:02d}'
+
+        # 진행률
+        ratio = 1.0 - (time_left / total) if total > 0 else 1.0
+
+        # 배경 박스
+        bx1, by1, bx2, by2 = w - 180, 36, w - 8, 82
+        cv2.rectangle(frame, (bx1, by1), (bx2, by2), (20, 20, 20), -1)
+        cv2.rectangle(frame, (bx1, by1), (bx2, by2), (60, 60, 60), 1)
+
+        # 남은 시간 텍스트
+        color = (80, 220, 80) if time_left > total * 0.2 else (60, 100, 255)
+        frame = self.put_korean_text(frame, ts, (bx1 + 14, by1 + 6),
+                                     font_size=22, color=color)
+
+        # 진행 바
+        bar_x1 = bx1 + 6
+        bar_y1 = by2 - 10
+        bar_w  = bx2 - bx1 - 12
+        cv2.rectangle(frame, (bar_x1, bar_y1), (bar_x1 + bar_w, by2 - 4),
+                      (50, 50, 50), -1)
+        filled = int(bar_w * ratio)
+        if filled > 0:
+            cv2.rectangle(frame, (bar_x1, bar_y1),
+                          (bar_x1 + filled, by2 - 4), color, -1)
+        return frame
+
     # ── 종료 버튼 ────────────────────────────────────────────
     QUIT_BTN_W = 90
     QUIT_BTN_H = 34
@@ -154,11 +194,9 @@ class FeedbackHandler:
         ear_msg:  str,
         head_msg: str,
         gaze_msg: str,
-        post_msg: str,
         ear_ok:   bool,
         head_ok:  bool,
         gaze_ok:  bool,
-        post_ok:  bool,
         exam_mode: bool = False,
     ) -> np.ndarray:
         """
@@ -197,19 +235,18 @@ class FeedbackHandler:
             font_size=20, color=color,
         )
 
-        # ── 4개 지표 상태 (우측 상단) ─────────────────────────
+        # ── 3개 지표 상태 (우측 상단) ─────────────────────────
         indicators = [
             ('눈', ear_ok),
             ('머리', head_ok),
             ('시선', gaze_ok),
-            ('자세', post_ok),
         ]
         for i, (label, ok) in enumerate(indicators):
             dot_color = (0, 210, 80) if ok else (0, 60, 220)
             frame = self.put_korean_text(
                 frame,
                 f'{"✓" if ok else "✗"} {label}',
-                (w - 200 + i * 50, 14),
+                (w - 170 + i * 55, 14),
                 font_size=16, color=dot_color,
             )
 
@@ -218,7 +255,6 @@ class FeedbackHandler:
         if not ear_ok:  alerts.append(ear_msg)
         if not head_ok: alerts.append(head_msg)
         if not gaze_ok: alerts.append(gaze_msg)
-        if not post_ok: alerts.append(post_msg)
 
         for j, msg in enumerate(alerts[:2]):
             frame = self.put_korean_text(
@@ -237,14 +273,54 @@ class FeedbackHandler:
         frame: np.ndarray,
         boxes: list,
         labels: list,
+        confs: list = None,
     ) -> np.ndarray:
-        """감지된 전자기기에 빨간 박스와 라벨을 그린다."""
-        for (x1, y1, x2, y2), label in zip(boxes, labels):
+        """감지된 전자기기에 빨간 박스와 라벨·신뢰도를 그린다."""
+        for i, ((x1, y1, x2, y2), label) in enumerate(zip(boxes, labels)):
+            conf = confs[i] if confs else None
             cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 0, 220), 2)
+            conf_str = f' {conf:.0%}' if conf is not None else ''
             frame = self.put_korean_text(
-                frame, f'[기기] {label}',
-                (x1, max(y1 - 24, 0)),
-                font_size=15, color=(20, 20, 255), bg_color=(0, 0, 0),
+                frame, f'[기기] {label}{conf_str}',
+                (x1, max(y1 - 26, 0)),
+                font_size=15, color=(60, 60, 255), bg_color=(0, 0, 0),
+            )
+        return frame
+
+    # ── 착용물·이어폰 바운딩 박스 ─────────────────────────────
+    def draw_accessory_boxes(
+        self,
+        frame: np.ndarray,
+        acc_warnings: list,
+        earphone_boxes: list = None,
+    ) -> np.ndarray:
+        """모자·마스크·선글라스·이어폰의 바운딩 박스와 레이블을 그린다."""
+        BOX_COLORS = {
+            'hat'       : (0, 140, 255),   # 주황
+            'mask'      : (0, 220, 220),   # 노랑
+            'sunglasses': (200,  50, 200), # 보라
+        }
+        for item in acc_warnings:
+            acc_type, msg, box = item[0], item[1], item[2] if len(item) > 2 else None
+            if box is None:
+                continue
+            x1, y1, x2, y2 = box
+            color = BOX_COLORS.get(acc_type, (0, 200, 200))
+            cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+            frame = self.put_korean_text(
+                frame, msg,
+                (x1, max(y1 - 26, 0)),
+                font_size=15, color=color, bg_color=(0, 0, 0),
+            )
+
+        # 이어폰 박스
+        for box in (earphone_boxes or []):
+            x1, y1, x2, y2 = box
+            cv2.rectangle(frame, (x1, y1), (x2, y2), (200, 200, 0), 2)
+            frame = self.put_korean_text(
+                frame, '이어폰 의심',
+                (x1, max(y1 - 26, 0)),
+                font_size=15, color=(200, 200, 0), bg_color=(0, 0, 0),
             )
         return frame
 
@@ -276,8 +352,9 @@ class FeedbackHandler:
             (x1 + 55, y1 + 10),
             font_size=22, color=(255, 255, 255),
         )
-        # 항목별 경고 메시지
-        for i, (_, msg) in enumerate(warnings):
+        # 항목별 경고 메시지 (warnings 항목이 2개 또는 3개 튜플 모두 처리)
+        for i, item in enumerate(warnings):
+            msg = item[1]
             frame = self.put_korean_text(
                 frame, f'  >> {msg}',
                 (x1 + 30, y1 + 48 + i * 46),
@@ -364,11 +441,10 @@ class FeedbackHandler:
         ear_ok:   bool,
         head_ok:  bool,
         gaze_ok:  bool,
-        post_ok:  bool,
     ):
         """
         집중도가 낮거나 특정 지표가 NG 이면 적절한 음성 알림을 발동한다.
-        우선순위: EAR > HEAD > GAZE > POSTURE > LOW_SCORE
+        우선순위: EAR > HEAD > GAZE > LOW_SCORE
         """
         if not ear_ok:
             self.speak('EAR_ISSUE')
@@ -376,7 +452,5 @@ class FeedbackHandler:
             self.speak('HEAD_ISSUE')
         elif not gaze_ok:
             self.speak('GAZE_ISSUE')
-        elif not post_ok:
-            self.speak('POSTURE_ISSUE')
         elif score < self.ALERT_SCORE:
             self.speak('LOW_SCORE')

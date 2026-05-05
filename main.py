@@ -4,6 +4,7 @@
 #
 # 실행 방법:
 #   python main.py              # 일반 집중 모니터링 모드
+#   python main.py --study      # 스터디 타이머 모드
 #   python main.py --exam       # 시험 감시 모드 (엄격한 임계값 + 컨닝 탐지)
 #
 # 종료:
@@ -20,7 +21,6 @@ from ergonomics_rules import (
     analyze_ear,
     analyze_head_pose,
     analyze_gaze,
-    analyze_posture,
     analyze_earphone,
     get_ear_consec_threshold,
     EXAM_PITCH_THRESHOLD,
@@ -32,19 +32,35 @@ from report           import generate_report
 from device_detector      import DeviceDetector
 from exam_proctor         import ExamProctor
 from accessory_detector   import AccessoryDetector
+from hat_detector         import YoloHatDetector
 from evidence_capture     import EvidenceCapture
 from evidence_viewer      import generate_evidence_report
+from timer_dialog         import get_study_duration
 
 
 def main():
     # ── CLI 인자 파싱 ─────────────────────────────────────────
     parser = argparse.ArgumentParser(description='집중도 모니터링 AI')
-    parser.add_argument('--exam', action='store_true',
-                        help='시험 감시 모드 활성화 (엄격한 임계값 + 컨닝 탐지)')
+    parser.add_argument('--exam',  action='store_true', help='시험 감시 모드')
+    parser.add_argument('--study', action='store_true', help='스터디 타이머 모드')
     args = parser.parse_args()
-    exam_mode = args.exam
+    exam_mode  = args.exam
+    study_mode = args.study and not args.exam   # exam 우선
 
-    mode_label = '[시험 감시 모드]' if exam_mode else '[집중도 모니터링 모드]'
+    # 스터디 모드: 타이머 시간 입력
+    study_duration = None   # 총 초
+    study_start    = None
+    if study_mode:
+        study_duration = get_study_duration()
+        if study_duration is None:
+            print('[INFO] 취소됨.')
+            return
+        import time as _time
+        study_start = _time.time()
+        mm, ss = divmod(study_duration, 60)
+        print(f'[INFO] 스터디 타이머: {mm:02d}:{ss:02d} 시작')
+
+    mode_label = '[시험 감시 모드]' if exam_mode else ('[스터디 타이머 모드]' if study_mode else '[집중도 모니터링 모드]')
     print(f'[INFO] {mode_label}로 시작합니다.')
 
     # ── 웹캠 초기화 ────────────────────────────────────────────
@@ -65,8 +81,9 @@ def main():
     scorer          = FocusScorer(log_dir='logs')
     feedback        = FeedbackHandler()
     device_detector    = DeviceDetector()
-    proctor            = ExamProctor()         if exam_mode else None
-    accessory_detector = AccessoryDetector()   if exam_mode else None
+    proctor            = ExamProctor() if exam_mode else None
+    hat_detector       = YoloHatDetector() if exam_mode else None
+    accessory_detector = AccessoryDetector(hat_detector) if exam_mode else None
 
     # 세션 ID = CSV 파일명의 타임스탬프 부분
     session_id = scorer.log_path.stem.replace('session_', '')
@@ -102,18 +119,18 @@ def main():
         frame_size[0], frame_size[1] = w, h
 
         # ── 랜드마크 추출 ──────────────────────────────────────
-        frame, face_lms, pose_lms = detector.process(frame)
+        frame, face_lms = detector.process(frame)
 
-        # ── 4개 지표 분석 ──────────────────────────────────────
+        # ── 3개 지표 분석 ──────────────────────────────────────
         ear_status,  ear_msg,  ear_val     = analyze_ear(face_lms, exam_mode)
         head_status, head_msg, yaw, pitch  = analyze_head_pose(face_lms, w, h, exam_mode)
         gaze_status, gaze_msg              = analyze_gaze(face_lms, w, exam_mode)
-        post_status, post_msg              = analyze_posture(pose_lms)
 
         # ── 이어폰 감지 (시험 모드에서만) ─────────────────────
         earphone_detected = False
+        earphone_boxes    = []
         if exam_mode and face_lms is not None:
-            earphone_detected, _ = analyze_earphone(face_lms, frame)
+            earphone_detected, _, earphone_boxes = analyze_earphone(face_lms, frame)
 
         # ── 착용물 감지 (시험 모드에서만) ─────────────────────
         accessory_warnings: list = []
@@ -130,10 +147,9 @@ def main():
         ear_ok  = face_visible and (ear_counter < ear_consec_threshold)
         head_ok = (head_status == 'GOOD')
         gaze_ok = (gaze_status == 'GOOD')
-        post_ok = (post_status == 'GOOD')
 
         # ── 전자기기 감지 ──────────────────────────────────────
-        dev_boxes, dev_labels = device_detector.detect(frame)
+        dev_boxes, dev_labels, dev_confs = device_detector.detect(frame)
 
         # ── 컨닝 패턴 감지 (시험 모드에서만) ──────────────────
         cheat_events: list[str] = []
@@ -149,17 +165,16 @@ def main():
 
         # ── 증거 사진 저장 (시험 모드) ────────────────────────
         if exam_mode and evidence is not None:
-            # 오버레이 전 클린 프레임 기준으로 저장
             if bool(dev_boxes):
-                clean = feedback.draw_device_boxes(frame.copy(), dev_boxes, dev_labels)
+                clean = feedback.draw_device_boxes(frame.copy(), dev_boxes, dev_labels, dev_confs)
                 evidence.try_save(clean, 'device')
-            for acc_type, _ in accessory_warnings:
-                evidence.try_save(frame, acc_type)
+            for item in accessory_warnings:
+                evidence.try_save(frame, item[0])
             if earphone_detected:
                 evidence.try_save(frame, 'earphone')
 
         # ── 점수 산출 ──────────────────────────────────────────
-        score = scorer.update(ear_ok, head_ok, gaze_ok, post_ok,
+        score = scorer.update(ear_ok, head_ok, gaze_ok,
                               device_detected=bool(dev_boxes))
         level, color = scorer.get_level(score)
 
@@ -172,14 +187,17 @@ def main():
             )
         frame = feedback.draw_overlay(
             frame, score, level, color,
-            ear_msg, head_msg, gaze_msg, post_msg,
-            ear_ok, head_ok, gaze_ok, post_ok,
+            ear_msg, head_msg, gaze_msg,
+            ear_ok, head_ok, gaze_ok,
             exam_mode=exam_mode,
         )
-        frame = feedback.draw_device_boxes(frame, dev_boxes, dev_labels)
+        frame = feedback.draw_device_boxes(frame, dev_boxes, dev_labels, dev_confs)
 
         if exam_mode and accessory_warnings:
             frame = feedback.draw_accessory_warning(frame, accessory_warnings)
+
+        if exam_mode:
+            frame = feedback.draw_accessory_boxes(frame, accessory_warnings, earphone_boxes)
 
         if exam_mode:
             frame = feedback.draw_exam_status(
@@ -188,7 +206,7 @@ def main():
             )
 
         # ── 음성 알림 ──────────────────────────────────────────
-        feedback.trigger_alerts(score, ear_ok, head_ok, gaze_ok, post_ok)
+        feedback.trigger_alerts(score, ear_ok, head_ok, gaze_ok)
 
         # ── 최근 30프레임 평균 ─────────────────────────────────
         recent = scorer.recent_avg(30)
@@ -197,6 +215,16 @@ def main():
             (w - 260, h - 35),
             font_size=16, color=(200, 200, 200),
         )
+
+        # ── 스터디 타이머 처리 ────────────────────────────────
+        time_left = None
+        if study_mode and study_duration is not None:
+            import time as _time
+            elapsed   = _time.time() - study_start
+            time_left = max(0.0, study_duration - elapsed)
+            frame = feedback.draw_study_timer(frame, time_left, study_duration)
+            if time_left == 0:
+                quit_flag[0] = True   # 타이머 종료 → 자동 세션 마감
 
         frame = feedback.draw_quit_button(frame)
         cv2.imshow(win_title, frame)
@@ -235,7 +263,6 @@ def main():
         print(f"  졸음 이벤트   : {summary['drowsy_events']}회")
         print(f"  머리 이탈     : {summary['head_out']}회")
         print(f"  시선 이탈     : {summary['gaze_out']}회")
-        print(f"  자세 불량     : {summary['posture_bad']}회")
         print(f"  [기기] 감지   : {summary['device_events']}회 / {summary['device_seconds']}초")
         if exam_mode:
             print('  ── 컨닝 패턴 감지 결과 ──')
