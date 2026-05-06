@@ -32,7 +32,7 @@ class DeviceDetector:
             run_every : N 프레임마다 1번 추론 (성능 최적화)
         """
         from ultralytics import YOLO
-        self.model      = YOLO('yolov8n.pt')   # 자동 다운로드
+        self.model      = YOLO('models/yolov8n.pt')
         self.conf       = conf
         self.run_every  = run_every
 
