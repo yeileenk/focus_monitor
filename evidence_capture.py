@@ -11,19 +11,21 @@ from datetime import datetime
 
 # 동일 유형 쿨다운 (초) — 짧은 시간에 같은 유형 중복 저장 방지
 COOLDOWN = {
-    'device'    : 4.0,
-    'hat'       : 6.0,
-    'mask'      : 6.0,
-    'sunglasses': 6.0,
-    'earphone'  : 8.0,
+    'device'            : 4.0,
+    'hat'               : 6.0,
+    'mask'              : 6.0,
+    'sunglasses'        : 6.0,
+    'earphone'          : 8.0,
+    'identity_mismatch' : 20.0,
 }
 
 LABEL_KO = {
-    'device'    : '전자기기 감지',
-    'hat'       : '모자 착용',
-    'mask'      : '마스크 착용',
-    'sunglasses': '선글라스 착용',
-    'earphone'  : '이어폰 착용 의심',
+    'device'            : '전자기기 감지',
+    'hat'               : '모자 착용',
+    'mask'              : '마스크 착용',
+    'sunglasses'        : '선글라스 착용',
+    'earphone'          : '이어폰 착용 의심',
+    'identity_mismatch' : '등록 인물 불일치 의심',
 }
 
 MAX_SHOTS = 60   # 세션당 최대 저장 장수

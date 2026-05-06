@@ -232,37 +232,79 @@ RIGHT_EAR_LM = 454   # 오른쪽 귀 앞
 
 def analyze_earphone(face_landmarks, frame: np.ndarray) -> tuple:
     """
-    귀 랜드마크 주변 영역의 밝기 분포로 이어폰 착용 여부를 추정한다.
-    정확도가 낮아 보조 지표로만 사용한다.
+    YCrCb 적응형 피부색 모델로 이어폰 착용 여부를 감지한다.
 
-    Returns:
-        detected : 이어폰 의심 여부
-        message  : 화면 표시용 메시지
-        boxes    : 감지된 귀 영역 박스 목록 [(x1,y1,x2,y2), ...]
+    얼굴의 실제 피부색을 샘플링해 YCrCb 색공간에서 피부 범위를 추정하고,
+    귀 주변에서 피부 범위를 벗어난 균일한 물체(이어폰)를 탐지한다.
+    색상 무관 — 흰 AirPods·검은 유선 이어폰 모두 감지 가능.
+
+    기법 출처: Skin detection in YCbCr color space (Kovac et al., 2003;
+               Chai & Ngan, 1999) — OpenCV 기반 구현.
     """
     if face_landmarks is None:
         return False, '', []
 
     try:
         h, w = frame.shape[:2]
+
+        # ── 피부색 기준 샘플링 (코 끝·양쪽 볼) ──────────────
+        # 랜드마크 1=코끝, 50=왼볼, 280=오른볼 (MediaPipe FaceMesh)
+        skin_pixels = []
+        for lm_idx in (1, 50, 280):
+            sx, sy = face_landmarks[lm_idx][0], face_landmarks[lm_idx][1]
+            p  = 10
+            patch = frame[max(0, sy-p):min(h, sy+p),
+                          max(0, sx-p):min(w, sx+p)]
+            if patch.size >= 27:
+                skin_pixels.append(patch.reshape(-1, 3))
+
+        if not skin_pixels:
+            return False, '', []
+
+        skin_arr  = np.concatenate(skin_pixels, axis=0).reshape(-1, 1, 3).astype(np.uint8)
+        skin_ycc  = cv2.cvtColor(skin_arr, cv2.COLOR_BGR2YCrCb).reshape(-1, 3).astype(float)
+        cr_mean   = float(np.mean(skin_ycc[:, 1]))
+        cb_mean   = float(np.mean(skin_ycc[:, 2]))
+        cr_std    = max(float(np.std(skin_ycc[:, 1])), 6.0)
+        cb_std    = max(float(np.std(skin_ycc[:, 2])), 6.0)
+
+        # ── 귀 영역 비피부 픽셀 분석 ─────────────────────────
         detected_sides = 0
-        boxes = []
+        boxes          = []
+        SIGMA          = 3.2   # 피부 허용 범위 (σ). 낮출수록 민감
 
         for lm_idx in (LEFT_EAR_LM, RIGHT_EAR_LM):
             ex, ey = face_landmarks[lm_idx][0], face_landmarks[lm_idx][1]
-            r = 18   # 탐색 반경 (픽셀)
+            r  = 20
             x1 = max(ex - r, 0); x2 = min(ex + r, w)
             y1 = max(ey - r, 0); y2 = min(ey + r, h)
 
             roi = frame[y1:y2, x1:x2]
-            if roi.size == 0:
+            if roi.size < 27:
                 continue
 
-            gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
-            std = float(np.std(gray))
-            mean_bright = float(np.mean(gray))
+            roi_ycc = cv2.cvtColor(roi, cv2.COLOR_BGR2YCrCb).astype(float)
+            cr_roi  = roi_ycc[:, :, 1]
+            cb_roi  = roi_ycc[:, :, 2]
 
-            if std > 55 and mean_bright < 120:
+            # 피부 범위 벗어난 픽셀 마스크
+            non_skin = (
+                (np.abs(cr_roi - cr_mean) > cr_std * SIGMA) |
+                (np.abs(cb_roi - cb_mean) > cb_std * SIGMA)
+            )
+
+            # 가장자리 제외 — 중앙 60% 영역만 사용 (배경·머리카락 차단)
+            rh, rw = non_skin.shape
+            m_y1 = rh // 5; m_y2 = 4 * rh // 5
+            m_x1 = rw // 5; m_x2 = 4 * rw // 5
+            non_skin_inner = non_skin[m_y1:m_y2, m_x1:m_x2]
+            non_skin_ratio = float(np.mean(non_skin_inner))
+
+            # 비피부 픽셀 내부 밝기 편차: 낮으면 균일한 물체(이어폰)
+            ns_vals = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)[non_skin]
+            internal_std = float(np.std(ns_vals)) if ns_vals.size >= 5 else 99.0
+
+            if non_skin_ratio > 0.42 and internal_std < 42:
                 detected_sides += 1
                 boxes.append((x1, y1, x2, y2))
 

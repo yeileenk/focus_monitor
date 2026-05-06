@@ -36,6 +36,7 @@ from hat_detector         import YoloHatDetector
 from evidence_capture     import EvidenceCapture
 from evidence_viewer      import generate_evidence_report
 from timer_dialog         import get_study_duration
+from exam_registration    import ExamRegistration
 
 
 def main():
@@ -93,7 +94,8 @@ def main():
     pitch_thr            = EXAM_PITCH_THRESHOLD if exam_mode else PITCH_THRESHOLD
     ear_counter          = 0
 
-    win_title  = 'exam_monitor' if exam_mode else 'focus_monitor'
+    win_title    = 'exam_monitor' if exam_mode else 'focus_monitor'
+    registration = None
     quit_flag  = [False]
     frame_size = [actual_w, actual_h]   # 콜백에서 참조할 프레임 크기
 
@@ -104,6 +106,24 @@ def main():
 
     cv2.namedWindow(win_title)
     cv2.setMouseCallback(win_title, on_mouse)
+
+    # ── 시험 모드: 5자세 등록 촬영 ────────────────────────────
+    if exam_mode:
+        registration = ExamRegistration(session_id, log_dir='logs')
+        print('[INFO] 시험 등록 촬영을 시작합니다. 위반 물품 없이 5자세를 찍어주세요.')
+        reg_ok = registration.run(
+            cap, detector, accessory_detector, device_detector, feedback,
+            analyze_head_pose, analyze_earphone, win_title=win_title,
+        )
+        cv2.setMouseCallback(win_title, on_mouse)  # 메인 루프 콜백 복구
+        if not reg_ok:
+            print('[INFO] 등록 촬영이 취소됐습니다.')
+            cap.release()
+            cv2.destroyAllWindows()
+            detector.release()
+            device_detector.release()
+            return
+        print(f'[INFO] 등록 완료 — {len(registration.ref_photos)}장 저장: {registration.save_dir}')
 
     print(f'[INFO] 종료: q 키 또는 화면 우하단 [종료] 버튼  |  중간 요약: s')
 
@@ -148,6 +168,14 @@ def main():
         head_ok = (head_status == 'GOOD')
         gaze_ok = (gaze_status == 'GOOD')
 
+        # 시선이 화면에 고정돼 있으면 고개가 약간 돌아가도 정상 처리.
+        # pitch 이탈(고개 숙임)은 스마트폰 조회 패턴이므로 보정하지 않는다.
+        if (exam_mode and not head_ok and gaze_ok
+                and abs(yaw) <= 30 and abs(pitch) <= pitch_thr):
+            head_ok = True
+            head_msg = f'시선 고정 보정 (Yaw {yaw:.1f}°)'
+            head_status = 'GOOD'
+
         # ── 전자기기 감지 ──────────────────────────────────────
         dev_boxes, dev_labels, dev_confs = device_detector.detect(frame)
 
@@ -163,15 +191,26 @@ def main():
                 pitch_threshold   = pitch_thr,
             )
 
-        # ── 증거 사진 저장 (시험 모드) ────────────────────────
+        # ── 증거 사진 저장 + 프록터 로깅 (시험 모드) ─────────
         if exam_mode and evidence is not None:
             if bool(dev_boxes):
                 clean = feedback.draw_device_boxes(frame.copy(), dev_boxes, dev_labels, dev_confs)
                 evidence.try_save(clean, 'device')
             for item in accessory_warnings:
-                evidence.try_save(frame, item[0])
+                ev_type = item[0]
+                evidence.try_save(frame, ev_type)
+                if proctor and proctor.log_event(ev_type, f'{ev_type} 감지'):
+                    pass   # 로그 기록됨
             if earphone_detected:
                 evidence.try_save(frame, 'earphone')
+
+        # ── 등록 얼굴 비교 (인물 교체 감지) ──────────────────
+        if registration and registration.completed:
+            if registration.check_identity(frame, face_lms, scorer.frame_cnt):
+                if proctor:
+                    proctor.log_event('identity_mismatch', '등록 얼굴과 히스토그램 불일치')
+                if evidence is not None:
+                    evidence.try_save(frame, 'identity_mismatch')
 
         # ── 점수 산출 ──────────────────────────────────────────
         score = scorer.update(ear_ok, head_ok, gaze_ok,
@@ -295,6 +334,13 @@ def main():
         if report_path:
             print(f'[INFO] 리포트 이미지: {report_path}')
             open_file(report_path)
+
+        # ── 등록 사진 리포트 (시험 모드) ──────────────────────
+        if exam_mode and registration is not None and registration.completed:
+            reg_report = registration.generate_registration_report('logs')
+            if reg_report:
+                print(f'[INFO] 등록 사진 리포트: {reg_report}')
+                open_file(reg_report)
 
         # ── 증거 사진 리포트 (시험 모드) ──────────────────────
         if exam_mode and evidence is not None and evidence.count > 0:

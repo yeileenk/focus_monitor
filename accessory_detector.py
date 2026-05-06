@@ -22,7 +22,7 @@ RIGHT_EYE_IN   = 362   # 오른쪽 눈 안쪽
 
 # 연속 감지 확정 프레임 수 (깜빡임 방지)
 CONFIRM_FRAMES = 18
-HAT_CONFIRM_FRAMES = 36
+HAT_CONFIRM_FRAMES = 20
 RELEASE_STEP   = 2     # 미감지 시 카운터 감소 속도
 
 
@@ -176,10 +176,9 @@ class AccessoryDetector:
         if colorful_candidate or light_candidate:
             return True, hat_box
 
-        if forehead_visible:
-            return False, None
-
-        # 어두운 모자는 이마 쪽을 넓게 가리고 아래 경계가 비교적 수평이다.
+        # 야구모자처럼 챙이 있으면 이마 랜드마크가 챙 아래에 찍혀
+        # forehead_visible=True 가 되므로 조기 종료하지 않고 어두운 모자 검사를 계속한다.
+        # 단, 이마가 보이면서 어두운 소재가 균일하지 않으면(머리카락) False 반환.
         if column_coverage < 0.58:
             return False, None
 
@@ -193,9 +192,13 @@ class AccessoryDetector:
 
         boundary_std = float(np.std(bottoms))
         near_bottom = float(np.mean(np.array(bottoms) > mask_bool.shape[0] * 0.48))
+
+        # 이마가 보이는 경우(야구모자 챙 아래 피부 노출) 경계 기준을 더 엄격히 적용
+        boundary_limit = max(4.0, mask_bool.shape[0] * 0.12) if forehead_visible \
+                         else max(5.0, mask_bool.shape[0] * 0.16)
         detected = (
             roi_bright < skin_bright * 0.72 and
-            boundary_std < max(5.0, mask_bool.shape[0] * 0.16) and
+            boundary_std < boundary_limit and
             near_bottom > 0.60
         )
         return detected, (hat_box if detected else None)

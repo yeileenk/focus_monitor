@@ -17,11 +17,15 @@ from typing import Optional
 
 # 패턴별 한글 라벨
 CHEAT_LABELS = {
-    'ai_tab'    : 'AI 탭 전환 의심',
-    'phone_look': '스마트폰 조회 의심',
-    'gaze_cheat': '시선 이탈 (메모·옆 화면)',
-    'device'    : '기기 감지',
-    'earphone'  : '이어폰 착용 의심',
+    'ai_tab'            : 'AI 탭 전환 의심',
+    'phone_look'        : '스마트폰 조회 의심',
+    'gaze_cheat'        : '시선 이탈 (메모·옆 화면)',
+    'device'            : '기기 감지',
+    'earphone'          : '이어폰 착용 의심',
+    'hat'               : '모자 착용 감지',
+    'sunglasses'        : '선글라스 착용 감지',
+    'mask'              : '마스크 착용 감지',
+    'identity_mismatch' : '등록 인물과 불일치 의심',
 }
 
 # 연속 GAZE_ISSUE 판정 기준 (초)
@@ -33,11 +37,15 @@ PHONE_LOOK_WINDOW_SEC  = 15.0
 PHONE_LOOK_MIN_EVENTS  = 3
 # 동일 이벤트 쿨다운 (초) — 중복 기록 방지
 COOLDOWN = {
-    'ai_tab'    : 8.0,
-    'phone_look': 12.0,
-    'gaze_cheat': 6.0,
-    'device'    : 5.0,
-    'earphone'  : 20.0,
+    'ai_tab'            : 8.0,
+    'phone_look'        : 12.0,
+    'gaze_cheat'        : 6.0,
+    'device'            : 5.0,
+    'earphone'          : 20.0,
+    'hat'               : 15.0,
+    'sunglasses'        : 15.0,
+    'mask'              : 15.0,
+    'identity_mismatch' : 30.0,
 }
 
 
@@ -127,6 +135,20 @@ class ExamProctor:
 
         return new_events
 
+    # ── 외부 이벤트 직접 로깅 (착용물·인물 불일치) ──────────
+    def log_event(self, event_type: str, detail: str = '') -> bool:
+        """
+        update() 외부에서 이벤트를 직접 기록한다.
+        쿨다운 내 중복이면 False, 기록되면 True 반환.
+        """
+        now = time.time()
+        if event_type not in self._last_event_time:
+            self._last_event_time[event_type] = 0.0
+        if not self._can_log(event_type, now):
+            return False
+        self._log(event_type, now, detail)
+        return True
+
     # ── 내부 헬퍼 ────────────────────────────────────────────
     def _can_log(self, event_type: str, now: float) -> bool:
         return now - self._last_event_time[event_type] >= COOLDOWN[event_type]
@@ -144,13 +166,17 @@ class ExamProctor:
     def summary(self) -> dict:
         counts = {k: 0 for k in CHEAT_LABELS}
         for e in self.events:
-            counts[e['type']] += 1
+            counts[e['type']] = counts.get(e['type'], 0) + 1
         return {
-            'total_cheat_events': len(self.events),
-            'ai_tab_events'     : counts['ai_tab'],
-            'phone_look_events' : counts['phone_look'],
-            'gaze_cheat_events' : counts['gaze_cheat'],
-            'device_events_exam': counts['device'],
-            'earphone_events'   : counts['earphone'],
-            'event_log'         : self.events,
+            'total_cheat_events'    : len(self.events),
+            'ai_tab_events'         : counts['ai_tab'],
+            'phone_look_events'     : counts['phone_look'],
+            'gaze_cheat_events'     : counts['gaze_cheat'],
+            'device_events_exam'    : counts['device'],
+            'earphone_events'       : counts['earphone'],
+            'hat_events'            : counts['hat'],
+            'sunglasses_events'     : counts['sunglasses'],
+            'mask_events'           : counts['mask'],
+            'identity_mismatch_events': counts['identity_mismatch'],
+            'event_log'             : self.events,
         }

@@ -201,11 +201,15 @@ def generate_report(history: list[dict], summary: dict, output_dir: str = 'logs'
         ax6.set_facecolor('#1A2D50')
 
         type_colors = {
-            'ai_tab'    : '#EF4444',
-            'phone_look': '#F97316',
-            'gaze_cheat': '#8B5CF6',
-            'device'    : '#FBBF24',
-            'earphone'  : '#06B6D4',
+            'ai_tab'            : '#EF4444',
+            'phone_look'        : '#F97316',
+            'gaze_cheat'        : '#8B5CF6',
+            'device'            : '#FBBF24',
+            'earphone'          : '#06B6D4',
+            'hat'               : '#FF6B6B',
+            'sunglasses'        : '#A78BFA',
+            'mask'              : '#34D399',
+            'identity_mismatch' : '#F43F5E',
         }
         type_y = {t: i for i, t in enumerate(type_colors)}
 
@@ -220,7 +224,8 @@ def generate_report(history: list[dict], summary: dict, output_dir: str = 'logs'
 
         ax6.set_yticks(list(type_y.values()))
         ax6.set_yticklabels(
-            ['AI탭전환', '스마트폰조회', '시선이탈', '기기감지', '이어폰'],
+            ['AI탭전환', '스마트폰조회', '시선이탈', '기기감지', '이어폰',
+             '모자', '선글라스', '마스크', '인물불일치'],
             color='#94A3B8', fontsize=9,
         )
         ax6.set_xlabel('시간 (초)', color='#94A3B8', fontsize=10)
