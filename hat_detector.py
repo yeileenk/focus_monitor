@@ -48,7 +48,7 @@ class YoloHatDetector:
     def __init__(
         self,
         model_path: str = 'models/hat_detector.pt',
-        conf: float = 0.55,
+        conf: float = 0.75,
         run_every: int = 3,
     ):
         self.model_path = Path(model_path)

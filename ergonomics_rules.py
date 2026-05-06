@@ -20,6 +20,8 @@ PITCH_THRESHOLD     = 25.0
 
 GAZE_RATIO_MIN      = 0.35
 GAZE_RATIO_MAX      = 0.65
+GAZE_VERT_MIN       = 0.25   # 홍채가 눈 위쪽 25% 미만 → 위쪽 시선 이탈
+GAZE_VERT_MAX       = 0.82   # 홍채가 눈 아래쪽 82% 초과 → 아래쪽 이탈
 
 # ── 시험 감시 모드 임계값 (더 엄격) ──────────────────────────
 EXAM_EAR_CONSEC_FRAMES  = 10    # ≈ 0.33초 — 짧은 눈 감음도 포착
@@ -27,6 +29,8 @@ EXAM_YAW_THRESHOLD      = 12.0  # 좌우 12도 초과 시 이탈
 EXAM_PITCH_THRESHOLD    = 15.0  # 상하 15도 초과 시 이탈
 EXAM_GAZE_RATIO_MIN     = 0.38
 EXAM_GAZE_RATIO_MAX     = 0.62
+EXAM_GAZE_VERT_MIN      = 0.30
+EXAM_GAZE_VERT_MAX      = 0.78
 
 
 # ── 1. 눈 개방도 (Eye Aspect Ratio) ─────────────────────────
@@ -171,30 +175,52 @@ def analyze_gaze(face_landmarks, img_w: int, exam_mode: bool = False) -> tuple[s
         return 'NO_FACE', '얼굴 없음'
 
     try:
-        # 왼쪽 눈 가로 범위
-        l_left  = face_landmarks[LEFT_EYE_IDX[0]][0]
-        l_right = face_landmarks[LEFT_EYE_IDX[3]][0]
-        # 왼쪽 홍채 중심 x
+        # ── 수평 비율 (좌/우 이탈) ───────────────────────────
+        l_left   = face_landmarks[LEFT_EYE_IDX[0]][0]
+        l_right  = face_landmarks[LEFT_EYE_IDX[3]][0]
         l_iris_x = np.mean([face_landmarks[i][0] for i in LEFT_IRIS_IDX])
 
-        # 오른쪽 눈 가로 범위
-        r_left  = face_landmarks[RIGHT_EYE_IDX[0]][0]
-        r_right = face_landmarks[RIGHT_EYE_IDX[3]][0]
+        r_left   = face_landmarks[RIGHT_EYE_IDX[0]][0]
+        r_right  = face_landmarks[RIGHT_EYE_IDX[3]][0]
         r_iris_x = np.mean([face_landmarks[i][0] for i in RIGHT_IRIS_IDX])
 
-        # 홍채가 눈 영역에서 차지하는 비율 (0~1, 0.5 = 정면)
-        l_ratio = (l_iris_x - l_left) / max(l_right - l_left, 1)
-        r_ratio = (r_iris_x - r_left) / max(r_right - r_left, 1)
+        l_ratio   = (l_iris_x - l_left)  / max(l_right - l_left, 1)
+        r_ratio   = (r_iris_x - r_left)  / max(r_right - r_left, 1)
         avg_ratio = (l_ratio + r_ratio) / 2.0
 
-        g_min = EXAM_GAZE_RATIO_MIN if exam_mode else GAZE_RATIO_MIN
-        g_max = EXAM_GAZE_RATIO_MAX if exam_mode else GAZE_RATIO_MAX
+        # ── 수직 비율 (위/아래 이탈) ─────────────────────────
+        # LEFT_EYE_IDX: [P1(left), P2(top1), P3(top2), P4(right), P5(bot1), P6(bot2)]
+        l_top_y    = min(face_landmarks[LEFT_EYE_IDX[1]][1],
+                         face_landmarks[LEFT_EYE_IDX[2]][1])
+        l_bot_y    = max(face_landmarks[LEFT_EYE_IDX[4]][1],
+                         face_landmarks[LEFT_EYE_IDX[5]][1])
+        l_iris_y   = np.mean([face_landmarks[i][1] for i in LEFT_IRIS_IDX])
+
+        r_top_y    = min(face_landmarks[RIGHT_EYE_IDX[1]][1],
+                         face_landmarks[RIGHT_EYE_IDX[2]][1])
+        r_bot_y    = max(face_landmarks[RIGHT_EYE_IDX[4]][1],
+                         face_landmarks[RIGHT_EYE_IDX[5]][1])
+        r_iris_y   = np.mean([face_landmarks[i][1] for i in RIGHT_IRIS_IDX])
+
+        l_v_ratio  = (l_iris_y - l_top_y) / max(l_bot_y - l_top_y, 1)
+        r_v_ratio  = (r_iris_y - r_top_y) / max(r_bot_y - r_top_y, 1)
+        avg_v_ratio = (l_v_ratio + r_v_ratio) / 2.0
+
+        g_min   = EXAM_GAZE_RATIO_MIN  if exam_mode else GAZE_RATIO_MIN
+        g_max   = EXAM_GAZE_RATIO_MAX  if exam_mode else GAZE_RATIO_MAX
+        gv_min  = EXAM_GAZE_VERT_MIN   if exam_mode else GAZE_VERT_MIN
+        gv_max  = EXAM_GAZE_VERT_MAX   if exam_mode else GAZE_VERT_MAX
 
         if avg_ratio < g_min or avg_ratio > g_max:
             direction = '왼쪽' if avg_ratio < 0.5 else '오른쪽'
             return 'GAZE_ISSUE', f'시선 이탈 ({direction}) ratio={avg_ratio:.2f}'
 
-        return 'GOOD', f'시선 정상 ratio={avg_ratio:.2f}'
+        if avg_v_ratio < gv_min:
+            return 'GAZE_ISSUE', f'시선 이탈 (위쪽) v_ratio={avg_v_ratio:.2f}'
+        if avg_v_ratio > gv_max:
+            return 'GAZE_ISSUE', f'시선 이탈 (아래쪽) v_ratio={avg_v_ratio:.2f}'
+
+        return 'GOOD', f'시선 정상 h={avg_ratio:.2f} v={avg_v_ratio:.2f}'
 
     except (IndexError, ZeroDivisionError):
         return 'GOOD', '시선 분석 불가 (홍채 랜드마크 없음)'
@@ -236,11 +262,11 @@ def analyze_earphone(face_landmarks, frame: np.ndarray) -> tuple:
             std = float(np.std(gray))
             mean_bright = float(np.mean(gray))
 
-            if std > 38 and mean_bright < 160:
+            if std > 55 and mean_bright < 120:
                 detected_sides += 1
                 boxes.append((x1, y1, x2, y2))
 
-        if detected_sides >= 1:
+        if detected_sides >= 2:
             return True, '이어폰 착용 의심', boxes
         return False, '', []
 

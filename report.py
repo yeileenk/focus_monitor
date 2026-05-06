@@ -12,7 +12,7 @@ import matplotlib.patches as mpatches
 from matplotlib import rcParams
 
 # 한글 폰트 설정
-rcParams['font.family'] = ['Malgun Gothic', 'AppleGothic', 'NanumGothic', 'DejaVu Sans']
+rcParams['font.family'] = ['AppleGothic', 'Apple SD Gothic Neo', 'DejaVu Sans']
 rcParams['axes.unicode_minus'] = False
 
 
@@ -38,6 +38,17 @@ def generate_report(history: list[dict], summary: dict, output_dir: str = 'logs'
     # 시간축: 프레임 인덱스 → 초 (30fps 가정)
     times = [i / 30 for i in range(len(scores))]
 
+    # 세션 duration 계산
+    total_secs = (history[-1]['time'] - history[0]['time']) if len(history) > 1 else len(history) / 30
+    dur_mm, dur_ss = divmod(int(total_secs), 60)
+    duration_str = f'{dur_mm:02d}:{dur_ss:02d}'
+
+    # 이벤트별 초 단위 (프레임 수 ÷ 30)
+    FPS = 30
+    drowsy_secs = round(summary.get('drowsy_events', 0) / FPS)
+    head_secs   = round(summary.get('head_out', 0) / FPS)
+    gaze_secs   = round(summary.get('gaze_out', 0) / FPS)
+
     if exam_events is None:
         exam_events = []
 
@@ -46,6 +57,9 @@ def generate_report(history: list[dict], summary: dict, output_dir: str = 'logs'
     fig = plt.figure(figsize=(14, fig_h), facecolor='#0F1B35')
     fig.suptitle(title, fontsize=18,
                  color='white', fontweight='bold', y=0.97)
+    fig.text(0.97, 0.97, f'세션 시간  {duration_str}',
+             ha='right', va='top', fontsize=12, color='#94A3B8',
+             fontweight='bold', transform=fig.transFigure)
 
     rows = 4 if exam_mode else 3
     grid = fig.add_gridspec(rows, 3, hspace=0.45, wspace=0.35)
@@ -129,9 +143,9 @@ def generate_report(history: list[dict], summary: dict, output_dir: str = 'logs'
     stat_lines = [
         ('평균 집중도',  f"{summary.get('avg_score', '-')}점"),
         ('집중 유지율',  f"{summary.get('focus_pct', '-')}%"),
-        ('졸음 이벤트', f"{summary.get('drowsy_events', '-')}회"),
-        ('머리 이탈',   f"{summary.get('head_out', '-')}회"),
-        ('시선 이탈',   f"{summary.get('gaze_out', '-')}회"),
+        ('졸음 이벤트', f"{summary.get('drowsy_events', '-')}회 / {drowsy_secs}초"),
+        ('머리 이탈',   f"{summary.get('head_out', '-')}회 / {head_secs}초"),
+        ('시선 이탈',   f"{summary.get('gaze_out', '-')}회 / {gaze_secs}초"),
         ('기기 감지',   f"{summary.get('device_events', 0)}회 / {summary.get('device_seconds', 0.0)}초"),
     ]
     if exam_mode:
